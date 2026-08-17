@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Time Punch Scanner</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <!-- HTML5 QR Code Scanner Library -->
+    <script src="https://unpkg.com/html5-qrcode"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans min-h-screen flex flex-col items-center p-4">
+
+    <div class="w-full max-w-md bg-gray-800 rounded-2xl shadow-xl p-6 border border-gray-700">
+        <h1 class="text-xl font-bold text-center mb-2 text-emerald-400">Supervisor Terminal</h1>
+        <p class="text-xs text-center text-gray-400 mb-4">Backend: GitHub Repository (data.json)</p>
+        
+        <!-- Action Selector -->
+        <div class="flex bg-gray-900 p-1 rounded-xl mb-4 border border-gray-700">
+            <button id="btn-in" onclick="setAction('Punch In')" class="flex-1 py-2 text-center rounded-lg font-semibold bg-emerald-600 text-white transition">Punch In</button>
+            <button id="btn-out" onclick="setAction('Punch Out')" class="flex-1 py-2 text-center rounded-lg font-semibold text-gray-400 transition">Punch Out</button>
+        </div>
+
+        <!-- QR Scanner Viewport -->
+        <div id="reader" class="w-full rounded-xl overflow-hidden border border-gray-700 mb-4 bg-black"></div>
+
+        <!-- Status Message -->
+        <div id="status-box" class="p-3 rounded-xl text-center text-sm font-medium bg-gray-900 border border-gray-700 text-gray-400 mb-4">
+            Ready to scan employee badge...
+        </div>
+
+        <!-- Recent Logs -->
+        <h2 class="text-sm font-semibold text-gray-400 mb-2">Recent Scans (This Session)</h2>
+        <div id="log-list" class="space-y-2 max-h-40 overflow-y-auto text-xs">
+            <!-- Dynamic entries appear here -->
+        </div>
+    </div>
+
+    <script>
+        // --- GITHUB CONFIGURATION ---
+        const REPO_OWNER = "YOUR_GITHUB_USERNAME_OR_ORG";
+        const REPO_NAME = "time-punch-system";
+        const FILE_PATH = "data.json";
+
+        // Retrieve token from browser storage, or prompt for it if missing
+        let GITHUB_TOKEN = localStorage.getItem('gh_punch_token');
+        if (!GITHUB_TOKEN) {
+            GITHUB_TOKEN = prompt("Enter your GitHub Personal Access Token (stored locally on this device only):");
+            if (GITHUB_TOKEN) {
+                localStorage.setItem('gh_punch_token', GITHUB_TOKEN.trim());
+            }
+        }
+        // ----------------------------
+
+        let currentAction = "Punch In";
+        let scanCooldown = false;
+
+        function setAction(action) {
+            currentAction = action;
+            const btnIn = document.getElementById('btn-in');
+            const btnOut = document.getElementById('btn-out');
+            if (action === 'Punch In') {
+                btnIn.className = "flex-1 py-2 text-center rounded-lg font-semibold bg-emerald-600 text-white transition";
+                btnOut.className = "flex-1 py-2 text-center rounded-lg font-semibold text-gray-400 transition";
+            } else {
+                btnIn.className = "flex-1 py-2 text-center rounded-lg font-semibold text-gray-400 transition";
+                btnOut.className = "flex-1 py-2 text-center rounded-lg font-semibold bg-rose-600 text-white transition";
+            }
+        }
+
+        function showStatus(message, type = 'info') {
+            const box = document.getElementById('status-box');
+            box.textContent = message;
+            box.className = `p-3 rounded-xl text-center text-sm font-medium border mb-4 ${
+                type === 'success' ? 'bg-emerald-950 border-emerald-600 text-emerald-300' :
+                type === 'error' ? 'bg-rose-950 border-rose-600 text-rose-300' :
+                'bg-gray-900 border-gray-700 text-gray-400'
+            }`;
+        }
+
+        function addLogEntry(name, action, time) {
+            const list = document.getElementById('log-list');
+            const div = document.createElement('div');
+            div.className = "flex justify-between items-center p-2 bg-gray-900 rounded border border-gray-700";
+            div.innerHTML = `<span class="font-semibold text-gray-200">${name}</span> <span class="${action === 'Punch In' ? 'text-emerald-400' : 'text-rose-400'}">${action}</span> <span class="text-gray-500">${time}</span>`;
+            list.prepend(div);
+        }
+
+        // Helper to safely encode strings to base64 for GitHub API
+        function utf8ToBase64(str) {
+            return btoa(unescape(encodeURIComponent(str)));
+        }
+
+        function base64ToUtf8(base64) {
+            return decodeURIComponent(escape(atob(base64)));
+        }
+
+        async function appendPunchToGitHub(punchRecord) {
+            const apiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${FILE_PATH}`;
+            
+            // 1. Fetch current data.json to get its current content and SHA
+            const getRes = await fetch(apiUrl, {
+                headers: {
+                    "Authorization": `Bearer ${GITHUB_TOKEN}`,
+                    "Accept": "application/vnd.github+json"
+                }
+            });
+
+            if (!getRes.ok) throw new Error("Failed to fetch existing data.json from GitHub.");
+            
+            const fileData = await getRes.json();
+            let currentLogs = [];
+            
+            if (fileData.content) {
+                try {
+                    currentLogs = JSON.parse(base64ToUtf8(fileData.content.replace(/\n/g, '')));
+                } catch (e) {
+                    currentLogs = [];
+                }
+            }
+
+            // 2. Append new punch
+            currentLogs.push(punchRecord);
+
+            // 3. Commit updated array back to GitHub
+            const putRes = await fetch(apiUrl, {
+                method: "PUT",
+                headers: {
+                    "Authorization": `Bearer ${GITHUB_TOKEN}`,
+                    "Accept": "application/vnd.github+json",
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    message: `Time punch: ${punchRecord.name} (${punchRecord.action}) at ${punchRecord.timestamp}`,
+                    content: utf8ToBase64(JSON.stringify(currentLogs, null, 2)),
+                    sha: fileData.sha
+                })
+            });
+
+            if (!putRes.ok) {
+                const errJson = await putRes.json();
+                throw new Error(errJson.message || "Failed to commit update to GitHub.");
+            }
+        }
+
+        async function onScanSuccess(decodedText) {
+            if (scanCooldown) return;
+
+            let employeeData;
+            try {
+                employeeData = JSON.parse(decodedText);
+            } catch (e) {
+                employeeData = { employeeId: decodedText, name: "Employee " + decodedText };
+            }
+
+            scanCooldown = true;
+            showStatus(`Committing punch for ${employeeData.name}...`, 'info');
+
+            try {
+                const punchRecord = {
+                    timestamp: new Date().toISOString(),
+                    employeeId: employeeData.employeeId,
+                    name: employeeData.name,
+                    action: currentAction,
+                    supervisorId: "SUP-01"
+                };
+
+                await appendPunchToGitHub(punchRecord);
+
+                const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                showStatus(`Committed ${currentAction} for ${employeeData.name}!`, 'success');
+                addLogEntry(employeeData.name, currentAction, timeStr);
+
+            } catch (error) {
+                showStatus(`Error: ${error.message}`, 'error');
+            }
+
+            // 5-second cooldown to prevent double scans
+            setTimeout(() => {
+                scanCooldown = false;
+                showStatus("Ready to scan next badge...", 'info');
+            }, 5000);
+        }
+
+        // Initialize Scanner
+        const html5QrCode = new Html5Qrcode("reader");
+        html5QrCode.start(
+            { facingMode: "environment" },
+            { fps: 10, qrbox: { width: 220, height: 220 } },
+            onScanSuccess
+        ).catch(err => {
+            showStatus("Camera access denied or unavailable.", "error");
+        });
+    </script>
+</body>
+</html>
